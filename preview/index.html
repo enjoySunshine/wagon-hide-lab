@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+  <title>花车蒙皮预览 - 包围体与射线测量</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #101418; }
+    #scene { position: fixed; inset: 0; display: block; }
+    #panel {
+      position: fixed; top: 0; left: 0; bottom: 0; width: 460px;
+      box-sizing: border-box; padding: 12px 14px;
+      background: rgba(10, 14, 18, 0.88); color: #cfe3ff;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-y: auto; white-space: pre; user-select: text;
+    }
+    #panel h1 { font-size: 14px; margin: 0 0 8px; color: #fff; font-family: sans-serif; }
+    #panel button {
+      font: 13px sans-serif; padding: 4px 12px; margin: 0 8px 8px 0;
+      background: #2b6cb0; color: #fff; border: 0; border-radius: 4px; cursor: pointer;
+    }
+    #panel button:hover { background: #3182ce; }
+    #report { margin: 0; }
+    .hint { color: #7f93a8; font-family: sans-serif; white-space: normal; }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="panel">
+    <h1>花车蒙皮 · CPU 包围体与点选测量</h1>
+    <button id="remeasure">重新测量（连跑三次）</button>
+    <span class="hint">数值由 preview/rig.mjs 的同一套网格算出，与 node preview/measure.mjs 打印一致。拖动可旋转视角。</span>
+    <div id="report">测量中…</div>
+  </div>
+  <script type="module">
+    import * as THREE from '../src/Three.js';
+    import { createRig, runBenchmark, reportLines, applyPose } from './rig.mjs';
+
+    // ---- 数据：与 measure.mjs 完全相同的网格、骨骼、射线 ----
+    const ctx = createRig();
+    const { rig, body, cape, prop, bones } = ctx;
+
+    function measure() {
+      const runs = runBenchmark(ctx);
+      document.getElementById('report').textContent = reportLines(runs).join('\n');
+    }
+
+    document.getElementById('remeasure').addEventListener('click', measure);
+
+    // ---- 渲染：标准渲染路径，不做任何改动 ----
+    let renderer = null;
+    let scene = null;
+    let camera = null;
+
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x101418);
+
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+      camera.position.set(3.2, 5.2, 17);
+      camera.lookAt(3.2, 4, 0);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+      const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+      sun.position.set(4, 10, 8);
+      scene.add(sun);
+
+      // 给两张皮和木箱换上真实材质用于显示（点选仍按双面算，CPU 数值不受影响）
+      body.material = new THREE.MeshStandardMaterial({ color: 0xe0855a, roughness: 0.75, metalness: 0.05, side: THREE.DoubleSide });
+      cape.material = new THREE.MeshStandardMaterial({ color: 0x4f7fd9, roughness: 0.7, metalness: 0.05, side: THREE.DoubleSide });
+      prop.material = new THREE.MeshStandardMaterial({ color: 0x9c6b3f, roughness: 0.9, metalness: 0.0 });
+
+      scene.add(rig);
+      scene.add(new THREE.SkeletonHelper(body));
+
+      const grid = new THREE.GridHelper(20, 20, 0x2c3a4a, 0x1c2632);
+      scene.add(grid);
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // 简单拖拽旋转视角
+      let dragging = false, px = 0, py = 0, theta = 0, phi = 0.12;
+      const canvas = renderer.domElement;
+      canvas.addEventListener('pointerdown', (e) => { dragging = true; px = e.clientX; py = e.clientY; });
+      window.addEventListener('pointerup', () => { dragging = false; });
+      window.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        theta -= (e.clientX - px) * 0.005;
+        phi = Math.min(1.4, Math.max(-1.4, phi + (e.clientY - py) * 0.005));
+        px = e.clientX; py = e.clientY;
+      });
+
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(() => {
+        // 动画：在“平”和“弯”之间来回摆动，只驱动骨骼转角和变形权重
+        const s = 0.5 - 0.5 * Math.cos(clock.getElapsedTime() * 1.2);
+        const bend = 0.35 * s;
+        const morph = 0.4 * s;
+        applyPose(bones, bend);
+        body.morphTargetInfluences[0] = morph;
+        cape.morphTargetInfluences[0] = morph * 0.5;
+
+        const r = 17;
+        camera.position.set(
+          3.2 + r * Math.sin(theta) * Math.cos(phi),
+          4 + r * Math.sin(phi),
+          r * Math.cos(theta) * Math.cos(phi)
+        );
+        camera.lookAt(3.2, 4, 0);
+        renderer.render(scene, camera);
+      });
+    } catch (err) {
+      console.error('渲染初始化失败（数值面板不受影响）:', err);
+    }
+
+    // 打开页面即量一次（连跑三次，报告第三次）
+    measure();
+  </script>
+</body>
+</html>
